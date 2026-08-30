@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─────────────────────────────────────────────────────────────────────────────
+# agent-sandbox — unified CLI for isolated AI coding agent containers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Resolve symlinks so `ln -s` installs work.
+_self="${BASH_SOURCE[0]}"
+while [[ -L "$_self" ]]; do
+    _dir="$(cd "$(dirname "$_self")" && pwd)"
+    _self="$(readlink "$_self")"
+    [[ "$_self" != /* ]] && _self="$_dir/$_self"
+done
+SANDBOX_ROOT="$(cd "$(dirname "$_self")" && pwd)"
+unset _self _dir
+
+source "${SANDBOX_ROOT}/lib/common.sh"
+
+VERSION="0.2.0"
+PROXY_PORT="${PROXY_PORT:-7890}"
+
+# ── Usage ────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<HELP
+${BOLD}agent-sandbox${NC} v${VERSION}
+Trial any AI coding agent in a fully isolated container.
+
+${BOLD}Usage:${NC}
+  sandbox up    <agent> [workspace] [--no-proxy]
+  sandbox down  <agent> [--purge]
+  sandbox list
+  sandbox status <agent>
+
+${BOLD}Agents:${NC}
+  omp          OMP (Oh My Pi)    — Copilot OAuth
+  claude-code  Claude Code       — API key or OAuth
+  codex        Codex (OpenAI)    — API key
+
+${BOLD}Examples:${NC}
+  sandbox up omp ~/my-project       # launch OMP with a project
+  sandbox up claude-code             # launch Claude Code
+  sandbox up codex --no-proxy        # launch without proxy forwarding
+  sandbox down omp --purge           # remove container + image
+  sandbox list                       # show all agents & status
+
+${BOLD}Environment:${NC}
+  PROXY_PORT         Host HTTP proxy port (default: 7890)
+  ANTHROPIC_API_KEY  Claude Code API key (alternative to OAuth)
+  OPENAI_API_KEY     Codex API key
+HELP
+}
+
+# ── Agent loading ────────────────────────────────────────────────────────────
+
+AGENTS_DIR="${SANDBOX_ROOT}/agents"
+
+list_agent_names() {
+    local d
+    for d in "${AGENTS_DIR}"/*/; do
+        [[ -f "${d}agent.sh" ]] && basename "$d"
+    done
+}
+
+load_agent() {
+    local name="$1"
+    local f="${AGENTS_DIR}/${name}/agent.sh"
+    [[ -f "$f" ]] || error "Unknown agent: ${name}\n       Available: $(list_agent_names | tr '\n' ' ')"
+    # shellcheck source=/dev/null
+    source "$f"
+}
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+
+cmd_up() {
+    local agent="" workspace="" no_proxy=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-proxy) no_proxy=true ;;
+            -*)  error "Unknown option: $1" ;;
+            *)
+                if [[ -z "$agent" ]]; then agent="$1"
+                elif [[ -z "$workspace" ]]; then workspace="$1"
+                else error "Unexpected argument: $1"
+                fi ;;
+        esac
+        shift
+    done
+    [[ -n "$agent" ]] || error "Usage: sandbox up <agent> [workspace] [--no-proxy]"
+
+    load_agent "$agent"
+    require_docker
+    detect_host_networking
+    detect_gh_token
+
+    header "$AGENT_DISPLAY_NAME Sandbox"
+    agent_check_auth
+
+    # Resolve workspace path
+    if [[ -n "$workspace" ]]; then
+        workspace="$(cd "$workspace" && pwd)"
+        info "Workspace: $workspace → /workspace"
+    fi
+
+    # Build image
+    build_image_if_needed "$AGENT_IMAGE"
+    remove_stale_container "$AGENT_CONTAINER"
+
+    # ── Assemble docker run arguments ────────────────────────────────────
+    SANDBOX_ARGS=(--name "$AGENT_CONTAINER")
+
+    # Host networking (Colima only)
+    # shellcheck disable=SC2086
+    [[ -n "${ADD_HOST_FLAG:-}" ]] && SANDBOX_ARGS+=($ADD_HOST_FLAG)
+
+    # Proxy
+    if [[ "$no_proxy" == false ]]; then
+        add_proxy_args
+    else
+        info "Proxy forwarding disabled (--no-proxy)"
+    fi
+
+    # Agent-specific mounts & env
+    agent_docker_args
+
+    # Workspace
+    [[ -n "$workspace" ]] && SANDBOX_ARGS+=(-v "${workspace}:/workspace")
+
+    # ── Launch ───────────────────────────────────────────────────────────
+    info "Starting sandbox..."
+    [[ "$no_proxy" == false ]] && echo "  Proxy:   http://host.docker.internal:${PROXY_PORT}"
+    agent_post_info
+    echo "  Exit:    type 'exit'"
+    echo "  Resume:  docker start -ai ${AGENT_CONTAINER}"
+    echo ""
+
+    docker run -it "${SANDBOX_ARGS[@]}" "$AGENT_IMAGE"
+
+    # Post-exit
+    echo ""
+    info "Sandbox exited. Container preserved as '${AGENT_CONTAINER}'."
+    echo "  Resume:  docker start -ai ${AGENT_CONTAINER}"
+    echo "  Delete:  sandbox down ${agent}"
+    echo "  Nuke:    sandbox down ${agent} --purge"
+}
+
+cmd_down() {
+    local agent="" purge=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --purge) purge=true ;;
+            -*)  error "Unknown option: $1" ;;
+            *)   [[ -z "$agent" ]] && agent="$1" || error "Unexpected argument: $1" ;;
+        esac
+        shift
+    done
+    [[ -n "$agent" ]] || error "Usage: sandbox down <agent> [--purge]"
+
+    load_agent "$agent"
+    require_docker
+
+    header "Tearing Down $AGENT_DISPLAY_NAME"
+    remove_container "$AGENT_CONTAINER"
+
+    if [[ "$purge" == true ]]; then
+        remove_image "$AGENT_IMAGE"
+    else
+        info "Image kept: $AGENT_IMAGE (pass --purge to remove)"
+    fi
+
+    echo ""
+    info "Done. Host configuration was never touched."
+}
+
+cmd_list() {
+    require_docker
+    header "Agents"
+    printf "  %-14s %-12s %s\n" "NAME" "STATUS" "CONTAINER"
+    echo "  ──────────────────────────────────────────"
+
+    local name
+    for name in $(list_agent_names); do
+        # Source in subshell to avoid polluting scope
+        (
+            source "${AGENTS_DIR}/${name}/agent.sh"
+            local st="—"
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${AGENT_CONTAINER}$"; then
+                st="running"
+            elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${AGENT_CONTAINER}$"; then
+                st="stopped"
+            fi
+            printf "  %-14s %-12s %s\n" "$name" "$st" "$AGENT_CONTAINER"
+        )
+    done
+}
+
+cmd_status() {
+    local agent="${1:-}"
+    [[ -n "$agent" ]] || { cmd_list; return; }
+
+    load_agent "$agent"
+    require_docker
+
+    if docker ps -a --format '{{.Names}}' | grep -q "^${AGENT_CONTAINER}$"; then
+        docker ps -a --filter "name=^${AGENT_CONTAINER}$" \
+            --format "table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Size}}"
+    else
+        warn "No container found: $AGENT_CONTAINER"
+    fi
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────────────────
+
+[[ $# -eq 0 ]] && { usage; exit 0; }
+
+case "$1" in
+    up)       shift; cmd_up "$@" ;;
+    down)     shift; cmd_down "$@" ;;
+    list|ls)  cmd_list ;;
+    status)   shift; cmd_status "$@" ;;
+    -h|--help|help) usage ;;
+    -v|--version)   echo "agent-sandbox v${VERSION}" ;;
+    *)        error "Unknown command: $1\n       Run 'sandbox help' for usage." ;;
+esac
