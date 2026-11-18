@@ -1,6 +1,6 @@
 # Agent Sandbox
 
-> 在完全隔离的容器中试用任何 AI 编程助手。对宿主配置零风险。
+> 在一次性的 Docker 容器里试用 OMP、Claude Code 和 Codex，容器内的助手配置与宿主分开。
 
 <p align="center">
   <a href="./README.md">English</a> ·
@@ -23,7 +23,7 @@
 
 ## 解决方案
 
-**Agent Sandbox** 为每个编程助手提供一次性的、预认证的容器环境。只读挂载现有凭证，容器内获得可写副本，自由实验，一条命令销毁一切。
+**Agent Sandbox** 为已支持的编程助手提供一次性的、预认证的容器环境。只读挂载现有凭证，容器内获得可写副本，自由实验，一条命令销毁一切。
 
 ```bash
 ./sandbox up omp                  # 进入沙盒（已认证，零配置）
@@ -34,13 +34,11 @@ exit                              # 退出
 
 ## 支持的 Agent
 
-| Agent | 状态 | 认证方式 | 文档 |
-|-------|------|----------|------|
-| **OMP** (Oh My Pi) | ✅ 可用 | agent.db (Copilot OAuth) | [`agents/omp/`](./agents/omp/) |
-| **Claude Code** | ✅ 可用 | `ANTHROPIC_API_KEY` 或 OAuth | [`agents/claude-code/`](./agents/claude-code/) |
-| **Codex** (OpenAI) | ✅ 可用 | `OPENAI_API_KEY` | [`agents/codex/`](./agents/codex/) |
-| Cursor | 🔲 计划中 | 待定 | — |
-| Windsurf | 🔲 计划中 | 待定 | — |
+| Agent | 认证方式 | 文档 |
+|-------|----------|------|
+| **OMP** (Oh My Pi) | `agent.db` (Copilot OAuth) | [`agents/omp/`](./agents/omp/) |
+| **Claude Code** | `ANTHROPIC_API_KEY` 或 OAuth | [`agents/claude-code/`](./agents/claude-code/) |
+| **Codex** (OpenAI) | `OPENAI_API_KEY` | [`agents/codex/`](./agents/codex/) |
 
 ## 快速开始
 
@@ -51,7 +49,7 @@ exit                              # 退出
 git clone https://github.com/m1911star/agent-sandbox.git
 cd agent-sandbox
 
-# 启动任意 Agent
+# 启动已支持的 Agent
 ./sandbox up omp                         # OMP（需先 `omp` 登录）
 ./sandbox up claude-code                 # Claude Code（需 API key 或 `claude login`）
 ./sandbox up codex                       # Codex（需 OPENAI_API_KEY）
@@ -169,8 +167,6 @@ agent_post_info()     # 输出启动后的使用提示
 - [x] Claude Code 沙盒（API key + OAuth）
 - [x] Codex 沙盒（OpenAI API key）
 - [x] 统一 CLI（`sandbox up/down/list`）
-- [ ] Cursor 沙盒
-- [ ] Windsurf 沙盒
 - [ ] 多 Agent 编排（共享网络，跨 Agent 工作流）
 - [ ] 快照与恢复（保存容器状态为可复用镜像）
 - [ ] Skill 试用模式（注入单个 skill 文件，无需完整配置克隆）

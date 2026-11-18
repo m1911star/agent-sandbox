@@ -1,6 +1,6 @@
 # Agent Sandbox
 
-> Trial any AI coding agent in a fully isolated container. Zero risk to your host configuration.
+> Try OMP, Claude Code, and Codex in disposable Docker containers with separate agent configuration.
 
 <p align="center">
   <a href="./README.zh-CN.md">中文文档</a> ·
@@ -23,7 +23,7 @@ You discover an interesting AI coding agent workflow, skill, or configuration. Y
 
 ## The Solution
 
-**Agent Sandbox** gives you disposable, pre-authenticated containers for each coding agent. Mount your existing credentials read-only, get a writable copy inside the container, experiment freely, and destroy everything with one command.
+**Agent Sandbox** gives you disposable, pre-authenticated containers for supported coding agents. Mount your existing credentials read-only, get a writable copy inside the container, experiment freely, and destroy everything with one command.
 
 ```bash
 ./sandbox up omp                  # Enter sandbox (fully authenticated, zero setup)
@@ -34,13 +34,11 @@ exit                              # Leave
 
 ## Supported Agents
 
-| Agent | Status | Auth Method | Docs |
-|-------|--------|-------------|------|
-| **OMP** (Oh My Pi) | ✅ Ready | agent.db (Copilot OAuth) | [`agents/omp/`](./agents/omp/) |
-| **Claude Code** | ✅ Ready | `ANTHROPIC_API_KEY` or OAuth | [`agents/claude-code/`](./agents/claude-code/) |
-| **Codex** (OpenAI) | ✅ Ready | `OPENAI_API_KEY` | [`agents/codex/`](./agents/codex/) |
-| Cursor | 🔲 Planned | TBD | — |
-| Windsurf | 🔲 Planned | TBD | — |
+| Agent | Auth Method | Docs |
+|-------|-------------|------|
+| **OMP** (Oh My Pi) | `agent.db` (Copilot OAuth) | [`agents/omp/`](./agents/omp/) |
+| **Claude Code** | `ANTHROPIC_API_KEY` or OAuth | [`agents/claude-code/`](./agents/claude-code/) |
+| **Codex** (OpenAI) | `OPENAI_API_KEY` | [`agents/codex/`](./agents/codex/) |
 
 ## Quick Start
 
@@ -51,7 +49,7 @@ exit                              # Leave
 git clone https://github.com/m1911star/agent-sandbox.git
 cd agent-sandbox
 
-# Launch any agent
+# Launch a supported agent
 ./sandbox up omp                         # OMP (needs prior `omp` login)
 ./sandbox up claude-code                 # Claude Code (needs API key or `claude login`)
 ./sandbox up codex                       # Codex (needs OPENAI_API_KEY)
@@ -169,8 +167,6 @@ See any existing agent in `agents/` for a complete example.
 - [x] Claude Code sandbox (API key + OAuth)
 - [x] Codex sandbox (OpenAI API key)
 - [x] Unified CLI (`sandbox up/down/list`)
-- [ ] Cursor sandbox
-- [ ] Windsurf sandbox
 - [ ] Multi-agent compose (shared network, cross-agent workflows)
 - [ ] Snapshot & restore (save container state as reusable image)
 - [ ] Skill trial mode (inject a single skill file without full config clone)
