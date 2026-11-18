@@ -1,175 +1,88 @@
 # Agent Sandbox
 
-> Try OMP, Claude Code, and Codex in disposable Docker containers with separate agent configuration.
+Run OMP, Claude Code, or Codex in a clean Docker container connected to your Magpie gateway. The sandbox does not import host agent configs, OAuth sessions, or GitHub credentials.
 
-<p align="center">
-  <a href="./README.zh-CN.md">中文文档</a> ·
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="#supported-agents">Agents</a> ·
-  <a href="#how-it-works">How It Works</a> ·
-  <a href="#roadmap">Roadmap</a>
-</p>
+[中文文档](./README.zh-CN.md)
 
----
+## Quick start
 
-## The Problem
-
-You discover an interesting AI coding agent workflow, skill, or configuration. You want to try it, but:
-
-- Your local setup is carefully tuned — you don't want to break it
-- Agent configs are global (`~/.omp/`, `~/.claude/`, `~/.codex/`) — hard to isolate
-- Rolling back failed experiments means hunting down scattered state files
-- Re-authentication after cleanup is painful
-
-## The Solution
-
-**Agent Sandbox** gives you disposable, pre-authenticated containers for supported coding agents. Mount your existing credentials read-only, get a writable copy inside the container, experiment freely, and destroy everything with one command.
+Start Docker and Magpie on your host. Run the following commands from this checkout. Replace `magpie` with your own gateway key if it differs.
 
 ```bash
-./sandbox up omp                  # Enter sandbox (fully authenticated, zero setup)
-# ... try new skills, break things, experiment ...
-exit                              # Leave
-./sandbox down omp --purge        # Nuclear option: erase all traces
+export OPENAI_BASE_URL='http://127.0.0.1:3425/v1'
+export OPENAI_API_KEY='magpie'
+
+./sandbox up omp
+# In the container shell:
+omp
 ```
 
-## Supported Agents
-
-| Agent | Auth Method | Docs |
-|-------|-------------|------|
-| **OMP** (Oh My Pi) | `agent.db` (Copilot OAuth) | [`agents/omp/`](./agents/omp/) |
-| **Claude Code** | `ANTHROPIC_API_KEY` or OAuth | [`agents/claude-code/`](./agents/claude-code/) |
-| **Codex** (OpenAI) | `OPENAI_API_KEY` | [`agents/codex/`](./agents/codex/) |
-
-## Quick Start
-
-**Prerequisites**: Docker runtime (colima / OrbStack / Docker Desktop).
+Use `./sandbox up claude-code` or `./sandbox up codex` for the other agents. Type `exit` in the container shell when you finish. Pass a project directory to mount it at `/workspace`:
 
 ```bash
-# Clone
-git clone https://github.com/m1911star/agent-sandbox.git
-cd agent-sandbox
-
-# Launch a supported agent
-./sandbox up omp                         # OMP (needs prior `omp` login)
-./sandbox up claude-code                 # Claude Code (needs API key or `claude login`)
-./sandbox up codex                       # Codex (needs OPENAI_API_KEY)
-
-# Mount a project to work on
-./sandbox up omp ~/my-project
-
-# Skip proxy forwarding (if you don't use one)
-./sandbox up claude-code --no-proxy
+./sandbox up codex ~/my-project
 ```
 
-Inside the container:
+**The workspace mount is read-write.** Edits in `/workspace` change the host directory. Without a workspace argument, nothing from your host filesystem is mounted by the launcher.
+
+| Agent | Container command | Default Magpie model | Configuration |
+|-------|-------------------|----------------------|---------------|
+| `omp` | `omp` | `auto/gpt-6.1-sol` | [OMP](./agents/omp/) |
+| `claude-code` | `claude` | `auto/claude-opus-4-8` | [Claude Code](./agents/claude-code/) |
+| `codex` | `codex` | `auto/gpt-6.1-sol` | [Codex](./agents/codex/) |
+
+## Resume or replace a container
+
+Run `docker start -ai sandbox-omp` to resume a stopped OMP container. Replace `omp` with `claude-code` or `codex` to resume another agent. The sandbox initializes missing agent config files and leaves existing files alone on restart. The container also retains the gateway, key, and model environment from its creation.
+
+`sandbox up` never deletes an existing container. To replace a container, including one created before Magpie support, save any container-only work you need and run `./sandbox down <agent>` before running `./sandbox up <agent>` again. Use the same procedure after changing the launcher environment. `--purge` also removes the selected `:magpie` image. It does not prune other images or remove an old `:latest` image.
+
+```text
+sandbox up <agent> [workspace] [--no-proxy]
+sandbox down <agent> [--purge]
+sandbox list
+sandbox status <agent>
+sandbox help
+```
+
+## Network and environment
+
+| Variable | Default | Use |
+|----------|---------|-----|
+| `OPENAI_BASE_URL` | `http://127.0.0.1:3425/v1` | Magpie API URL as seen from the host. Use HTTP or HTTPS with a hostname or IP address and an optional port and path. Do not include credentials, a query, or a fragment. |
+| `OPENAI_API_KEY` | Required | Export the Magpie gateway key. The launcher passes it by environment name as `MAGPIE_API_KEY`, not in Docker arguments or the image. Docker users with access to the container can inspect its environment. |
+| `MAGPIE_MODEL` | Agent default above | Override the model ID when you create a sandbox. |
+| `NPM_CONFIG_REGISTRY` | `https://registry.npmjs.org` | Use a trusted package registry for the first image build. Set a URL without credentials. If the image already exists, this setting does not rebuild it. |
+| `PROXY_PORT` | Unset | Opt in to a host HTTP proxy for container traffic. `--no-proxy` ignores this setting. |
+
+The sandbox uses Docker bridge networking. It does not publish ports, use the host network, or change host listeners. Outbound traffic goes direct by default, even if the Docker client has proxy defaults. First-time builds also go direct and need access to the image and package registries.
+
+- The launcher rewrites loopback addresses such as `localhost`, `127.0.0.1`, and `[::1]` to `host.docker.internal`, keeping the scheme, port, and path. It leaves non-loopback URLs unchanged. Use a URL the container can reach. For HTTPS, the certificate must be valid for the hostname the container uses.
+- OrbStack and Docker Desktop provide `host.docker.internal`. OrbStack can reach Magpie on macOS loopback with the default URL. If the active Docker endpoint is a Colima socket, the launcher tries the Colima VM gateway. Reachability depends on the Colima network and listener configuration.
+- For other daemons, the launcher tries Docker's `host-gateway` mapping when it needs `host.docker.internal`. On native Linux this does not reach services bound only to `127.0.0.1` or `::1`. On a remote daemon, the mapping points at the Docker host, not your CLI machine. In these cases use a Magpie URL already reachable from the Docker network.
+- To use a host HTTP proxy, set `PROXY_PORT` to the port of an existing proxy reachable from Docker, for example `PROXY_PORT=7890 ./sandbox up omp`. `NO_PROXY` and `no_proxy` include the Magpie hostname, so requests to Magpie bypass the proxy. Use `--no-proxy` if the proxy is unavailable.
+
+Codex commands also have network access inside their workspace sandbox. Docker still filters system calls. See [running network commands in Codex](./agents/codex/#network-access-for-commands) to turn off network access for Codex commands.
+
+## Run the regression tests
 
 ```bash
-omp                              # or `claude` / `codex`
-# Fully working, pre-authenticated
-# Tweak config, install skills, experiment...
-exit                             # Done
+bash tests/cli.sh
 ```
 
-Cleanup:
+The tests exercise the public CLI with a fake Docker executable. They do not use a Docker daemon or Magpie. If `jq` is installed on the test host, the tests also run the image's entrypoint in a temporary home. The launcher does not need host `jq`.
 
-```bash
-./sandbox down omp               # Remove container, keep image for fast re-launch
-./sandbox down omp --purge       # Remove container + image completely
-```
+## Add an agent
 
-## CLI Reference
-
-```
-sandbox up    <agent> [workspace] [--no-proxy]    Launch sandbox
-sandbox down  <agent> [--purge]                   Tear down
-sandbox list                                      Show agents & status
-sandbox status <agent>                            Container details
-sandbox help                                      Usage info
-```
-
-## How It Works
-
-```
-┌─────────── Host ───────────┐          ┌─────────── Container ───────────┐
-│                             │          │                                  │
-│  ~/.omp/  ~/.claude/  etc. ─┼── :ro ──→│ /tmp/sandbox-auth/              │
-│                             │          │         │                        │
-│                             │          │    entrypoint copies to:         │
-│                             │          │    ~/.<agent>/  (rw)             │
-│                             │          │                                  │
-│  localhost:7890 (proxy) ───┼─ tcp ───→│ host.docker.internal:7890        │
-│                             │          │                                  │
-└─────────────────────────────┘          └──────────────────────────────────┘
-         NEVER modified                       Destroyed on sandbox-down
-```
-
-### Key Design Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| Read-only mounts + copy | Container can never corrupt host state, even on crash |
-| Entrypoint copies on start | Writable workspace for the agent without bind-mount writes |
-| Plugin-style agents | Each agent is a self-contained `agent.sh` — easy to add new ones |
-| No `--rm` by default | Allows `docker start -ai` to resume work-in-progress |
-| Colima-only `--add-host` | Docker Desktop / OrbStack resolve `host.docker.internal` natively |
-| `--no-proxy` flag | Works without a local proxy running |
-
-## Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PROXY_PORT` | `7890` | HTTP proxy port on the host |
-| `ANTHROPIC_API_KEY` | — | Claude Code API key (alternative to OAuth) |
-| `OPENAI_API_KEY` | — | Codex API key |
-
-## Project Structure
-
-```
-agent-sandbox/
-├── sandbox                # Unified CLI entry point
-├── lib/
-│   └── common.sh          # Shared utilities (Docker, proxy, networking)
-├── agents/
-│   ├── omp/               # OMP agent
-│   │   ├── agent.sh       # Agent definition (auth, Dockerfile, mounts)
-│   │   └── README.md      # OMP-specific docs
-│   ├── claude-code/       # Claude Code agent
-│   │   ├── agent.sh
-│   │   └── README.md
-│   └── codex/             # Codex agent
-│       ├── agent.sh
-│       └── README.md
-├── README.md              # This file
-├── README.zh-CN.md        # Chinese documentation
-└── LICENSE                # MIT
-```
-
-## Adding a New Agent
-
-Create `agents/<name>/agent.sh` implementing four functions:
-
-```bash
-AGENT_DISPLAY_NAME="My Agent"
-AGENT_IMAGE="sandbox-my-agent:latest"
-AGENT_CONTAINER="sandbox-my-agent"
-
-agent_check_auth()    # Validate host credentials exist
-agent_dockerfile()    # Print Dockerfile to stdout
-agent_docker_args()   # Append -v/-e flags to SANDBOX_ARGS array
-agent_post_info()     # Print post-launch usage hints
-```
-
-See any existing agent in `agents/` for a complete example.
+Define the image tag, container name, display name, shell command, and default model in `agents/<name>/agent.sh`. Add a `Dockerfile` in the same directory. It can copy `sandbox-entry` from the build context and pass the agent name to the entrypoint. Add any container-side setup to `lib/sandbox-entry`.
 
 ## Roadmap
 
-- [x] OMP sandbox with GitHub Copilot auth passthrough
-- [x] Claude Code sandbox (API key + OAuth)
-- [x] Codex sandbox (OpenAI API key)
-- [x] Unified CLI (`sandbox up/down/list`)
-- [ ] Multi-agent compose (shared network, cross-agent workflows)
-- [ ] Snapshot & restore (save container state as reusable image)
-- [ ] Skill trial mode (inject a single skill file without full config clone)
+- [x] Clean OMP, Claude Code, and Codex sandboxes with Magpie access
+- [x] Unified CLI for container lifecycle and status
+- [ ] Shared networking for multi-agent workflows
+- [ ] Container snapshots and restore
+- [ ] Trial mode for a single skill file
 
 ## License
 

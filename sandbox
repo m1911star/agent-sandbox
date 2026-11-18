@@ -1,58 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ─────────────────────────────────────────────────────────────────────────────
-# agent-sandbox — unified CLI for isolated AI coding agent containers
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Resolve symlinks so `ln -s` installs work.
 _self="${BASH_SOURCE[0]}"
 while [[ -L "$_self" ]]; do
-    _dir="$(cd "$(dirname "$_self")" && pwd)"
+    _dir="$(CDPATH= cd -- "$(dirname "$_self")" && pwd)"
     _self="$(readlink "$_self")"
     [[ "$_self" != /* ]] && _self="$_dir/$_self"
 done
-SANDBOX_ROOT="$(cd "$(dirname "$_self")" && pwd)"
+SANDBOX_ROOT="$(CDPATH= cd -- "$(dirname "$_self")" && pwd)"
 unset _self _dir
 
 source "${SANDBOX_ROOT}/lib/common.sh"
 
 VERSION="0.2.0"
-PROXY_PORT="${PROXY_PORT:-7890}"
-
-# ── Usage ────────────────────────────────────────────────────────────────────
+DEFAULT_GATEWAY_URL=http://127.0.0.1:3425/v1
 
 usage() {
     cat <<HELP
-${BOLD}agent-sandbox${NC} v${VERSION}
-Trial any AI coding agent in a fully isolated container.
+agent-sandbox v${VERSION}
+Run a clean coding agent in Docker with your Magpie gateway.
 
-${BOLD}Usage:${NC}
+Usage:
   sandbox up    <agent> [workspace] [--no-proxy]
   sandbox down  <agent> [--purge]
   sandbox list
   sandbox status <agent>
 
-${BOLD}Agents:${NC}
-  omp          OMP (Oh My Pi)    — Copilot OAuth
-  claude-code  Claude Code       — API key or OAuth
-  codex        Codex (OpenAI)    — API key
+Agents:
+  omp          OMP (Oh My Pi), command: omp
+  claude-code  Claude Code, command: claude
+  codex        Codex, command: codex
 
-${BOLD}Examples:${NC}
+Examples:
   sandbox up omp ~/my-project       # launch OMP with a project
   sandbox up claude-code             # launch Claude Code
   sandbox up codex --no-proxy        # launch without proxy forwarding
   sandbox down omp --purge           # remove container + image
   sandbox list                       # show all agents & status
 
-${BOLD}Environment:${NC}
-  PROXY_PORT         Host HTTP proxy port (default: 7890)
-  ANTHROPIC_API_KEY  Claude Code API key (alternative to OAuth)
-  OPENAI_API_KEY     Codex API key
+Environment:
+  OPENAI_API_KEY       Required Magpie gateway key (export on the host)
+  OPENAI_BASE_URL      Magpie API URL (default: ${DEFAULT_GATEWAY_URL})
+  MAGPIE_MODEL         Model ID override (defaults depend on the agent)
+  NPM_CONFIG_REGISTRY  Optional package registry URL for an image build
+  PROXY_PORT           Optional host HTTP proxy port (direct by default)
 HELP
 }
-
-# ── Agent loading ────────────────────────────────────────────────────────────
 
 AGENTS_DIR="${SANDBOX_ROOT}/agents"
 
@@ -65,19 +58,18 @@ list_agent_names() {
 
 load_agent() {
     local name="$1"
-    local f="${AGENTS_DIR}/${name}/agent.sh"
-    [[ -f "$f" ]] || error "Unknown agent: ${name}\n       Available: $(list_agent_names | tr '\n' ' ')"
-    # shellcheck source=/dev/null
-    source "$f"
+    AGENT_DIR="${AGENTS_DIR}/${name}"
+    if [[ ! "$name" =~ ^[a-z][a-z0-9-]*$ || ! -f "$AGENT_DIR/agent.sh" ]]; then
+        error "Unknown agent: $name. Choose from: $(list_agent_names | paste -sd ' ' -)."
+    fi
+    source "$AGENT_DIR/agent.sh"
 }
 
-# ── Commands ─────────────────────────────────────────────────────────────────
-
 cmd_up() {
-    local agent="" workspace="" no_proxy=false
+    local agent="" workspace="" skip_proxy=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --no-proxy) no_proxy=true ;;
+            --no-proxy) skip_proxy=true ;;
             -*)  error "Unknown option: $1" ;;
             *)
                 if [[ -z "$agent" ]]; then agent="$1"
@@ -90,59 +82,47 @@ cmd_up() {
     [[ -n "$agent" ]] || error "Usage: sandbox up <agent> [workspace] [--no-proxy]"
 
     load_agent "$agent"
+    local model="${MAGPIE_MODEL:-$AGENT_MODEL}" proxy_port="${PROXY_PORT:-}" magpie_key="${OPENAI_API_KEY:-}"
+    [[ -n "$magpie_key" ]] || error "Export OPENAI_API_KEY with your Magpie gateway key."
+    unset OPENAI_API_KEY MAGPIE_API_KEY
+    parse_gateway_url "${OPENAI_BASE_URL-$DEFAULT_GATEWAY_URL}" \
+        || error "Set OPENAI_BASE_URL to an HTTP(S) URL with a host and optional port and path, without credentials, query, or fragment."
+    [[ "$model" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$ ]] || error "Set MAGPIE_MODEL to a Magpie model ID."
+    [[ "$skip_proxy" == false ]] || proxy_port=""
+    [[ -z "$proxy_port" ]] || valid_port "$proxy_port" || error "Set PROXY_PORT to a port from 1 to 65535."
+    if [[ -n "$workspace" ]]; then
+        workspace="$(CDPATH= cd -- "$workspace" && pwd -P)" || error "Workspace directory is not accessible."
+        [[ "$workspace" != *:* ]] || error "Workspace path cannot contain a colon."
+    fi
+
     require_docker
-    detect_host_networking
-    detect_gh_token
+    if container_exists "$AGENT_CONTAINER" -a; then
+        error "$AGENT_CONTAINER already exists. Resume with 'docker start -ai $AGENT_CONTAINER' if stopped, or explicitly remove it with 'sandbox down $agent' before creating a new sandbox."
+    fi
 
     header "$AGENT_DISPLAY_NAME Sandbox"
-    agent_check_auth
-
-    # Resolve workspace path
+    SANDBOX_ARGS=(--name "$AGENT_CONTAINER" --network bridge -e MAGPIE_API_KEY -e "OPENAI_BASE_URL=$GATEWAY_URL" -e "MAGPIE_MODEL=$model")
+    if [[ -f "$AGENT_DIR/seccomp.json" ]]; then
+        SANDBOX_ARGS+=(--security-opt "seccomp=$AGENT_DIR/seccomp.json")
+    fi
+    network_args "$proxy_port"
     if [[ -n "$workspace" ]]; then
-        workspace="$(cd "$workspace" && pwd)"
-        info "Workspace: $workspace → /workspace"
+        SANDBOX_ARGS+=(-v "${workspace}:/workspace:rw")
+        info "Workspace: $workspace (read-write at /workspace)"
     fi
+    build_image_if_needed
 
-    # Build image
-    build_image_if_needed "$AGENT_IMAGE"
-    remove_stale_container "$AGENT_CONTAINER"
-
-    # ── Assemble docker run arguments ────────────────────────────────────
-    SANDBOX_ARGS=(--name "$AGENT_CONTAINER")
-
-    # Host networking (Colima only)
-    # shellcheck disable=SC2086
-    [[ -n "${ADD_HOST_FLAG:-}" ]] && SANDBOX_ARGS+=($ADD_HOST_FLAG)
-
-    # Proxy
-    if [[ "$no_proxy" == false ]]; then
-        add_proxy_args
-    else
-        info "Proxy forwarding disabled (--no-proxy)"
-    fi
-
-    # Agent-specific mounts & env
-    agent_docker_args
-
-    # Workspace
-    [[ -n "$workspace" ]] && SANDBOX_ARGS+=(-v "${workspace}:/workspace")
-
-    # ── Launch ───────────────────────────────────────────────────────────
-    info "Starting sandbox..."
-    [[ "$no_proxy" == false ]] && echo "  Proxy:   http://host.docker.internal:${PROXY_PORT}"
-    agent_post_info
+    printf '  Agent:   %s\n  Model:   %s\n  Gateway: %s\n' "$AGENT_COMMAND" "$model" "$GATEWAY_URL"
     echo "  Exit:    type 'exit'"
     echo "  Resume:  docker start -ai ${AGENT_CONTAINER}"
     echo ""
 
-    docker run -it "${SANDBOX_ARGS[@]}" "$AGENT_IMAGE"
+    MAGPIE_API_KEY="$magpie_key" docker run -it "${SANDBOX_ARGS[@]}" "$AGENT_IMAGE"
 
-    # Post-exit
     echo ""
     info "Sandbox exited. Container preserved as '${AGENT_CONTAINER}'."
     echo "  Resume:  docker start -ai ${AGENT_CONTAINER}"
-    echo "  Delete:  sandbox down ${agent}"
-    echo "  Nuke:    sandbox down ${agent} --purge"
+    echo "  Delete:  sandbox down ${agent} [--purge]"
 }
 
 cmd_down() {
@@ -181,13 +161,12 @@ cmd_list() {
 
     local name
     for name in $(list_agent_names); do
-        # Source in subshell to avoid polluting scope
         (
-            source "${AGENTS_DIR}/${name}/agent.sh"
+            load_agent "$name"
             local st="—"
-            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${AGENT_CONTAINER}$"; then
+            if container_exists "$AGENT_CONTAINER"; then
                 st="running"
-            elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${AGENT_CONTAINER}$"; then
+            elif container_exists "$AGENT_CONTAINER" -a; then
                 st="stopped"
             fi
             printf "  %-14s %-12s %s\n" "$name" "$st" "$AGENT_CONTAINER"
@@ -202,15 +181,13 @@ cmd_status() {
     load_agent "$agent"
     require_docker
 
-    if docker ps -a --format '{{.Names}}' | grep -q "^${AGENT_CONTAINER}$"; then
+    if container_exists "$AGENT_CONTAINER" -a; then
         docker ps -a --filter "name=^${AGENT_CONTAINER}$" \
             --format "table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Size}}"
     else
         warn "No container found: $AGENT_CONTAINER"
     fi
 }
-
-# ── Dispatch ─────────────────────────────────────────────────────────────────
 
 [[ $# -eq 0 ]] && { usage; exit 0; }
 

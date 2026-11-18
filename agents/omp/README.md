@@ -1,57 +1,17 @@
 # OMP Sandbox
 
-Isolated container for trialing [OMP (Oh My Pi)](https://github.com/nicepkg/oh-my-pi) configurations, skills, and workflows.
+Run [OMP (Oh My Pi)](https://github.com/can1357/oh-my-pi) with clean configuration and your Magpie gateway. The image uses Bun 1.4.4. It does not import your host `agent.db` or OMP settings.
 
-## Authentication
-
-OMP stores credentials in `~/.omp/agent/agent.db` — a SQLite database containing OAuth tokens (typically GitHub Copilot):
-
-```
-agent.db → auth_credentials table
-  ├── provider: "github-copilot"
-  ├── credential_type: "oauth"
-  └── data: { access: "gho_...", expires: <unix_ts>, refresh: "gho_..." }
-```
-
-The sandbox copies this DB at container start. OMP handles token refresh in-memory. **No re-login required.**
-
-## Files Mounted
-
-| Host Path | Container Path | Mode | Purpose |
-|-----------|---------------|------|---------|
-| `~/.omp/agent/agent.db` | `/tmp/sandbox-auth/agent.db` → `~/.omp/agent/agent.db` | ro → copy | Auth credentials |
-| `~/.omp/agent/config.yml` | `/tmp/sandbox-auth/config.yml` → `~/.omp/agent/config.yml` | ro → copy | Model & preferences |
-| Optional: workspace | `/workspace` | rw | Project directory |
-
-## Usage
+From the Agent Sandbox checkout, [export the Magpie URL and key](../../README.md#quick-start), then run:
 
 ```bash
-sandbox up omp                        # basic
-sandbox up omp ~/repos/my-app         # with project
-sandbox up omp --no-proxy             # skip proxy forwarding
-PROXY_PORT=1087 sandbox up omp        # custom proxy port
-docker start -ai sandbox-omp          # resume session
-sandbox down omp --purge              # full cleanup
+./sandbox up omp
+# In the container shell:
+omp
 ```
 
-## Inside the Container
+OMP uses the `magpie` provider in `~/.omp/agent/models.yml` and the default model role in `~/.omp/agent/config.yml`. The provider uses the OpenAI Responses API and reads `MAGPIE_API_KEY`, so OMP does not use this key to authenticate its built-in OpenAI cloud models. The default model is `magpie/auto/gpt-6.1-sol` with reasoning disabled. Set `MAGPIE_MODEL` to a different Magpie model ID without the `magpie/` prefix when you create a sandbox.
 
-```bash
-omp                              # fully pre-authenticated
+Change either file inside the container to try other settings. `docker start -ai sandbox-omp` preserves the files. If either file is missing at startup, the sandbox initializes that file from the original container environment.
 
-sed -i 's/claude-opus-4.6-1m/claude-sonnet-4/' ~/.omp/agent/config.yml
-
-cat > /workspace/CLAUDE.md << 'EOF'
-@./my-new-skill.md
-EOF
-# all changes are container-local — host is never touched
-```
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `No model selected` | agent.db missing/empty | Run `omp` → `/login` on host |
-| Network timeout | Proxy not running | Start proxy, or `--no-proxy` |
-| Image build fails | Registry unreachable | `sandbox down omp --purge` and retry |
-| Token expired | OAuth TTL | `sandbox down omp && sandbox up omp` |
+Pass a project path to `./sandbox up omp` only if you want a read-write mount at `/workspace`. See [network and environment settings](../../README.md#network-and-environment) if OMP cannot reach Magpie.

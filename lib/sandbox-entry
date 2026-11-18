@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+write_missing() (
+    local file="$1" tmp
+    [[ ! -e "$file" && ! -L "$file" ]] || return 0
+    umask 077
+    mkdir -p -- "${file%/*}"
+    tmp=$(mktemp "$file.XXXXXX")
+    trap 'rm -f -- "$tmp"' EXIT
+    cat > "$tmp"
+    mv -- "$tmp" "$file"
+)
+
+quote_string() {
+    jq -n --arg value "$1" '$value'
+}
+
+agent="$1"
+shift
+case "$agent" in
+    omp)
+        url=$(quote_string "$OPENAI_BASE_URL")
+        model=$(quote_string "$MAGPIE_MODEL")
+        role=$(quote_string "magpie/$MAGPIE_MODEL")
+        write_missing "$HOME/.omp/agent/models.yml" <<EOF
+providers:
+  magpie:
+    baseUrl: $url
+    apiKey: MAGPIE_API_KEY
+    api: openai-responses
+    models:
+      - id: $model
+        name: Magpie
+        reasoning: false
+EOF
+        write_missing "$HOME/.omp/agent/config.yml" <<EOF
+modelRoles:
+  default: $role
+EOF
+        ;;
+    claude-code)
+        export ANTHROPIC_BASE_URL="${OPENAI_BASE_URL%/}"
+        ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL%/v1}"
+        export ANTHROPIC_AUTH_TOKEN="$MAGPIE_API_KEY"
+        export ANTHROPIC_MODEL="$MAGPIE_MODEL"
+        export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+        ;;
+    codex)
+        url=$(quote_string "$OPENAI_BASE_URL")
+        model=$(quote_string "$MAGPIE_MODEL")
+        write_missing "$HOME/.codex/config.toml" <<EOF
+model = $model
+model_provider = "magpie"
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+network_access = true
+
+[model_providers.magpie]
+name = "Magpie"
+base_url = $url
+env_key = "MAGPIE_API_KEY"
+wire_api = "responses"
+EOF
+        ;;
+esac
+
+exec bash "$@"

@@ -1,52 +1,23 @@
 # Codex Sandbox
 
-Isolated container for trialing [Codex CLI](https://github.com/openai/codex) configurations and workflows.
+Run [Codex CLI](https://github.com/openai/codex) with clean configuration and your Magpie gateway. The sandbox does not copy your host `~/.codex/` or sign-in state.
 
-## Authentication
-
-| Method | How | Precedence |
-|--------|-----|------------|
-| **API Key** | Set `OPENAI_API_KEY` env var on host | Checked first |
-| **Config dir** | Pre-configured `~/.codex/` on host | Fallback |
-
-The sandbox copies `~/.codex/` read-only into the container and makes a writable copy at startup.
-
-## Files Mounted
-
-| Host Path | Container Path | Mode | Purpose |
-|-----------|---------------|------|---------|
-| `~/.codex/` | `/tmp/sandbox-auth/codex/` → `~/.codex/` | ro → copy | Config + credentials |
-| `OPENAI_API_KEY` | env var passthrough | — | API key auth |
-| Optional: workspace | `/workspace` | rw | Project directory |
-
-## Usage
+From the Agent Sandbox checkout, [export the Magpie URL and key](../../README.md#quick-start), then run:
 
 ```bash
-OPENAI_API_KEY=sk-... sandbox up codex         # API key
-sandbox up codex                                # from ~/.codex/ config
-sandbox up codex ~/repos/my-app                 # with project
-sandbox up codex --no-proxy                     # skip proxy
-docker start -ai sandbox-codex                  # resume
-sandbox down codex --purge                      # full cleanup
+./sandbox up codex
+# In the container shell:
+codex
 ```
 
-## Inside the Container
+The sandbox initializes `~/.codex/config.toml` with the `magpie` provider and `auto/gpt-6.1-sol` as the default model. The provider uses the OpenAI Responses API and reads `MAGPIE_API_KEY`. Set `MAGPIE_MODEL` when creating a sandbox to select a different model. You can edit `~/.codex/config.toml` inside the container. `docker start -ai sandbox-codex` does not replace an existing config file.
 
-```bash
-codex                            # start Codex CLI
+Pass a project path to `./sandbox up codex` only if you want a read-write mount at `/workspace`.
 
-# experiment with instructions
-cat > ~/.codex/instructions.md << 'EOF'
-Always write tests before implementation.
-Use TypeScript strict mode.
-EOF
-# all changes are container-local
-```
+## Network access for commands
 
-## Troubleshooting
+The generated Codex config enables `workspace-write` and sets `sandbox_workspace_write.network_access = true`. Codex commands can access Magpie and the internet while writes remain limited to the workspace and temporary directories. The launcher does not change approvals. To block network access for Codex commands, set `network_access = false` in the container's config and relaunch `codex`.
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `No API key` | No env var or config dir | Set `OPENAI_API_KEY` |
-| Network timeout | Proxy misconfigured | Use `--no-proxy` |
-| Image build fails | npm unreachable | Check network; `sandbox down codex --purge` and retry |
+Codex uses bubblewrap inside Docker. The launcher applies a [seccomp profile](./seccomp.json) to let bubblewrap create and configure its own namespaces. This profile starts with [Moby's default](https://github.com/moby/profiles/blob/f862455628f78f84c937e967e4a03902fb1dee11/seccomp/default.json) and adds only rules for `clone` with `CLONE_NEWUSER`, `unshare` with `CLONE_NEWUSER` or `CLONE_NEWPID`, and `mount`, `umount2`, and `pivot_root`. Docker still filters system calls, and the launcher adds no capabilities and does not use privileged mode. The upstream profile is [Apache 2.0 licensed](./LICENSE-moby.txt).
+
+Docker hosts that prohibit unprivileged user namespaces can still block Codex commands. See [Codex sandbox prerequisites](https://developers.openai.com/codex/concepts/sandboxing#prerequisites) for runtime requirements. See [network and environment settings](../../README.md#network-and-environment) if the container shell cannot reach the network either.
