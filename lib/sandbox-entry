@@ -40,14 +40,17 @@ modelRoles:
 EOF
         ;;
     claude-code)
-        ANTHROPIC_BASE_URL="$OPENAI_BASE_URL"
-        while [[ "$ANTHROPIC_BASE_URL" == */ ]]; do
-            ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL%/}"
-        done
-        export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL%/v1}"
-        export ANTHROPIC_AUTH_TOKEN="$MAGPIE_API_KEY"
-        export ANTHROPIC_MODEL="$MAGPIE_MODEL"
-        export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+        if [[ -z "${ANTHROPIC_BASE_URL:-}" ]]; then
+            ANTHROPIC_BASE_URL="$OPENAI_BASE_URL"
+            while [[ "$ANTHROPIC_BASE_URL" == */ ]]; do
+                ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL%/}"
+            done
+            ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL%/v1}"
+        fi
+        export ANTHROPIC_BASE_URL
+        export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-$MAGPIE_API_KEY}"
+        export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-$MAGPIE_MODEL}"
+        export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
         ;;
     codex)
         url=$(quote_string "$OPENAI_BASE_URL")

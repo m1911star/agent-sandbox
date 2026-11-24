@@ -62,6 +62,7 @@ load_agent() {
     if [[ ! "$name" =~ ^[a-z][a-z0-9-]*$ || ! -f "$AGENT_DIR/agent.sh" ]]; then
         error "Unknown agent: $name. Choose from: $(list_agent_names | paste -sd ' ' -)."
     fi
+    unset AGENT_DISPLAY_NAME AGENT_IMAGE AGENT_CONTAINER AGENT_COMMAND AGENT_MODEL AGENT_ENV_STYLE
     source "$AGENT_DIR/agent.sh"
 }
 
@@ -83,8 +84,8 @@ cmd_up() {
 
     load_agent "$agent"
     local model="${MAGPIE_MODEL:-$AGENT_MODEL}" proxy_port="${PROXY_PORT:-}" magpie_key="${OPENAI_API_KEY:-}"
+    unset OPENAI_API_KEY MAGPIE_API_KEY ANTHROPIC_AUTH_TOKEN
     [[ -n "$magpie_key" ]] || error "Export OPENAI_API_KEY with your Magpie gateway key."
-    unset OPENAI_API_KEY MAGPIE_API_KEY
     if [[ -n "${NPM_CONFIG_REGISTRY:-}" ]]; then
         parse_http_url "$NPM_CONFIG_REGISTRY" \
             || error "Set NPM_CONFIG_REGISTRY to an HTTP(S) URL with a host and optional port and path, without credentials, query, or fragment."
@@ -106,6 +107,12 @@ cmd_up() {
 
     header "$AGENT_DISPLAY_NAME Sandbox"
     SANDBOX_ARGS=(--name "$AGENT_CONTAINER" --network bridge -e MAGPIE_API_KEY -e "OPENAI_BASE_URL=$GATEWAY_URL" -e "MAGPIE_MODEL=$model")
+    if [[ "${AGENT_ENV_STYLE:-}" == anthropic ]]; then
+        local anthropic_base_url
+        anthropic_base_url=$(strip_v1_suffix "$GATEWAY_URL")
+        SANDBOX_ARGS+=(-e ANTHROPIC_AUTH_TOKEN -e "ANTHROPIC_BASE_URL=$anthropic_base_url"
+            -e "ANTHROPIC_MODEL=$model" -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1)
+    fi
     if [[ -f "$AGENT_DIR/seccomp.json" ]]; then
         SANDBOX_ARGS+=(--security-opt "seccomp=$AGENT_DIR/seccomp.json")
     fi
@@ -122,7 +129,11 @@ cmd_up() {
     echo ""
 
     local rc=0
-    MAGPIE_API_KEY="$magpie_key" docker run -it "${SANDBOX_ARGS[@]}" "$AGENT_IMAGE" || rc=$?
+    if [[ "${AGENT_ENV_STYLE:-}" == anthropic ]]; then
+        MAGPIE_API_KEY="$magpie_key" ANTHROPIC_AUTH_TOKEN="$magpie_key" docker run -it "${SANDBOX_ARGS[@]}" "$AGENT_IMAGE" || rc=$?
+    else
+        MAGPIE_API_KEY="$magpie_key" docker run -it "${SANDBOX_ARGS[@]}" "$AGENT_IMAGE" || rc=$?
+    fi
 
     if container_exists "$AGENT_CONTAINER" -a; then
         echo ""

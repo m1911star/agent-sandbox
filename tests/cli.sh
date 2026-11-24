@@ -20,7 +20,7 @@ cat > "$case_dir/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$FAKE_DIR/calls"
-[[ "$*" != *"$FAKE_KEY"* && -z "${OPENAI_API_KEY+x}" ]] || exit 97
+[[ "$*" != *"$FAKE_KEY"* && "$*" != *host-anthropic-decoy* && -z "${OPENAI_API_KEY+x}" ]] || exit 97
 case "$1" in
     info) printf '%s\n' "${FAKE_OS:-OrbStack}" ;;
     ps)
@@ -62,7 +62,7 @@ case "$1" in
         esac
         ;;
     build)
-        [[ -z "${MAGPIE_API_KEY:-}" && "${!#}" == - ]] || exit 99
+        [[ -z "${MAGPIE_API_KEY:-}" && -z "${ANTHROPIC_AUTH_TOKEN:-}" && "${!#}" == - ]] || exit 99
         printf '%s\n' "$@" > "$FAKE_DIR/build"
         mkdir -p "$FAKE_DIR/context"
         archive="$FAKE_DIR/context.tar"
@@ -74,6 +74,11 @@ case "$1" in
     run)
         [[ "${MAGPIE_API_KEY:-}" == "$FAKE_KEY" ]] || exit 100
         printf '%s\n' "$@" > "$FAKE_DIR/run"
+        if grep -Fxq -- ANTHROPIC_AUTH_TOKEN "$FAKE_DIR/run"; then
+            [[ "${ANTHROPIC_AUTH_TOKEN:-}" == "$FAKE_KEY" ]] || exit 100
+        else
+            [[ -z "${ANTHROPIC_AUTH_TOKEN+x}" ]] || exit 100
+        fi
         if [[ -n "${FAKE_RUN_CONTAINER:-}" ]]; then
             printf '%s\texited\n' "$FAKE_RUN_CONTAINER" > "$FAKE_DIR/run-container"
         fi
@@ -126,7 +131,7 @@ reject up omp
 reject up codex
 reject up claude-code
 [[ ! -e "$case_dir/calls" ]] || fail 'missing key contacted Docker or GitHub'
-export OPENAI_API_KEY="$FAKE_KEY"
+export OPENAI_API_KEY="$FAKE_KEY" ANTHROPIC_AUTH_TOKEN='host-anthropic-decoy'
 for url in '' 'file://localhost/v1' 'http://user:pass@gateway/v1' 'http://localhost:65536/v1' \
     'http://[::g]/v1' 'http://[1::2::3]/v1' 'http://999.1.1.1/v1' 'http://bad label/v1' \
     'http://gateway/bad%zz' 'http://gateway/v1?key=test' 'https://gateway/v1#fragment' \
@@ -149,7 +154,7 @@ if grep -Fq 'cd:' "$case_dir/output"; then fail 'workspace error leaked raw cd s
 
 for agent in omp claude-code codex; do
     rm -rf "$case_dir/context"
-    FAKE_IMAGE=absent launch up "$agent"
+    AGENT_ENV_STYLE=anthropic FAKE_IMAGE=absent launch up "$agent"
     has_line run "sandbox-$agent:magpie"
     has_line build "sandbox-$agent:magpie"
     no_line build NPM_CONFIG_REGISTRY
@@ -177,8 +182,18 @@ for agent in omp claude-code codex; do
     cmp -s "$root/agents/$agent/Dockerfile" "$case_dir/context/Dockerfile" || fail 'wrong Dockerfile transferred'
     cmp -s "$root/lib/sandbox-entry" "$case_dir/context/sandbox-entry" || fail 'wrong entrypoint transferred'
     case "$agent" in
-        claude-code) has_line run 'MAGPIE_MODEL=auto/claude-opus-4-8' ;;
-        *) has_line run 'MAGPIE_MODEL=auto/gpt-6.1-sol' ;;
+        claude-code)
+            has_line run 'MAGPIE_MODEL=auto/claude-opus-4-8'
+            has_line run ANTHROPIC_AUTH_TOKEN
+            has_line run 'ANTHROPIC_BASE_URL=http://host.docker.internal:3425'
+            has_line run 'ANTHROPIC_MODEL=auto/claude-opus-4-8'
+            has_line run 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1'
+            ;;
+        *)
+            has_line run 'MAGPIE_MODEL=auto/gpt-6.1-sol'
+            no_line run ANTHROPIC_AUTH_TOKEN
+            no_line run 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1'
+            ;;
     esac
 done
 [[ ! -e "$case_dir/colima-calls" ]] || fail 'OrbStack must not query an installed Colima CLI'
@@ -186,6 +201,11 @@ FAKE_IMAGE=absent NPM_CONFIG_REGISTRY=https://registry.example/npm/ launch up cl
 has_line build 'NPM_CONFIG_REGISTRY=https://registry.example/npm/'
 no_line run 'NPM_CONFIG_REGISTRY=https://registry.example/npm/'
 has_line run 'OPENAI_BASE_URL=http://host.docker.internal:3425/v1'
+
+OPENAI_BASE_URL='https://gateway.example:4343/nested/v1///' MAGPIE_MODEL='custom/claude-model' launch up claude-code
+has_line run ANTHROPIC_AUTH_TOKEN
+has_line run 'ANTHROPIC_BASE_URL=https://gateway.example:4343/nested'
+has_line run 'ANTHROPIC_MODEL=custom/claude-model'
 
 workspace=$(cd "$case_dir/project with spaces" && pwd -P)
 url='https://gateway.example:4343/nested/with%20space/v1/'
@@ -330,14 +350,21 @@ else
     printf 'OMP and Codex entrypoint tests skipped (jq is not installed on the test host).\n'
 fi
 
+unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
 bash "$entry" claude-code -c '
     [[ "$ANTHROPIC_BASE_URL" == "https://gateway.example:4343/nested/with%20space" &&
        "$ANTHROPIC_AUTH_TOKEN" == "$FAKE_KEY" && "$ANTHROPIC_MODEL" == "custom/model-id" &&
        "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" == 1 ]]
-' || fail 'Claude Code environment'
+' || fail 'Claude Code fallback environment'
 OPENAI_BASE_URL='https://gateway.example:4343/nested/v1///' bash "$entry" claude-code -c '
     [[ "$ANTHROPIC_BASE_URL" == "https://gateway.example:4343/nested" ]]
 ' || fail 'Claude Code must strip all trailing slashes before /v1'
+ANTHROPIC_BASE_URL='https://custom.example' ANTHROPIC_AUTH_TOKEN='container-token' ANTHROPIC_MODEL=override \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0 bash "$entry" claude-code -c '
+    [[ "$ANTHROPIC_BASE_URL" == "https://custom.example" &&
+       "$ANTHROPIC_AUTH_TOKEN" == "container-token" && "$ANTHROPIC_MODEL" == override &&
+       "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" == 0 ]]
+' || fail 'Claude Code entrypoint overwrote container environment'
 if bash "$entry" unknown -c 'exit 0' 2> "$case_dir/output"; then
     fail 'unknown entrypoint agent should fail'
 fi
