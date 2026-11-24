@@ -57,40 +57,53 @@ expand_ipv6() {
 
 HOST_GATEWAY=host.docker.internal
 
-parse_gateway_url() {
-    local url="$1" LC_ALL=C scheme host port path expanded loopback=false
+parse_http_url() {
+    local url="$1" LC_ALL=C scheme host port path expanded hostname loopback=false
     local path_chars="[A-Za-z0-9._~!\$&'()*+,;=:@/-]"
-    local pattern="^([Hh][Tt][Tt][Pp][Ss]?://)(\[[A-Fa-f0-9:.]+\]|[^/:]+)(:([0-9]{1,5}))?(/($path_chars|%[A-Fa-f0-9]{2})*)?$"
+    local pattern="^([Hh][Tt][Tt][Pp][Ss]?://)(\[[A-Fa-f0-9:.]+\]|[A-Za-z0-9.-]+)(:([0-9]{1,5}))?(/($path_chars|%[A-Fa-f0-9]{2})*)?$"
     local label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
     [[ "$url" =~ $pattern ]] || return 1
     scheme="${BASH_REMATCH[1]}" host="${BASH_REMATCH[2]}" port="${BASH_REMATCH[4]}" path="${BASH_REMATCH[5]}"
     [[ -z "$port" ]] || valid_port "$port" || return 1
 
-    GATEWAY_URL="$url"
-    GATEWAY_HOST=$(printf '%s' "$host" | LC_ALL=C tr '[:upper:]' '[:lower:]') || return 1
-    if [[ "$GATEWAY_HOST" == \[*\] ]]; then
-        GATEWAY_HOST="${GATEWAY_HOST:1:${#GATEWAY_HOST}-2}"
-        expanded=$(expand_ipv6 "$GATEWAY_HOST") || return 1
+    host=$(printf '%s' "$host" | LC_ALL=C tr '[:upper:]' '[:lower:]') || return 1
+    if [[ "$host" == \[*\] ]]; then
+        host="${host:1:${#host}-2}"
+        expanded=$(expand_ipv6 "$host") || return 1
         if [[ "$expanded" =~ ^(0{1,4}:){7}0{0,3}1$ || "$expanded" =~ ^(0{1,4}:){5}ffff:7f[0-9a-f]{2}: ]]; then
             loopback=true
         fi
     else
-        host="${GATEWAY_HOST%.}"
-        if [[ "$host" =~ ^[0-9.]+$ ]]; then
-            valid_ipv4 "$host" || return 1
-            [[ "$host" != 127.* ]] || loopback=true
+        hostname="${host%.}"
+        if [[ "$hostname" =~ ^[0-9.]+$ ]]; then
+            valid_ipv4 "$hostname" || return 1
+            [[ "$hostname" != 127.* ]] || loopback=true
         else
-            [[ ${#host} -le 253 && "$host" =~ ^$label(\.$label)*$ ]] || return 1
-            case "$host" in
+            [[ ${#hostname} -le 253 && "$hostname" =~ ^$label(\.$label)*$ ]] || return 1
+            case "$hostname" in
                 localhost|*.localhost) loopback=true ;;
             esac
         fi
     fi
 
-    if [[ "$loopback" == true ]]; then
+    URL_SCHEME="$scheme" URL_HOST="$host" URL_PORT="$port" URL_PATH="$path" URL_LOOPBACK="$loopback"
+}
+
+parse_gateway_url() {
+    parse_http_url "$1" || return 1
+    GATEWAY_URL="$1" GATEWAY_HOST="$URL_HOST"
+    if [[ "$URL_LOOPBACK" == true ]]; then
         GATEWAY_HOST="$HOST_GATEWAY"
-        GATEWAY_URL="$scheme$HOST_GATEWAY${port:+:$port}$path"
+        GATEWAY_URL="$URL_SCHEME$HOST_GATEWAY${URL_PORT:+:$URL_PORT}$URL_PATH"
     fi
+}
+
+strip_v1_suffix() {
+    local url="$1"
+    while [[ "$url" == */ ]]; do
+        url="${url%/}"
+    done
+    printf '%s\n' "${url%/v1}"
 }
 
 host_mapping() {
@@ -100,7 +113,7 @@ host_mapping() {
 
     local endpoint="${DOCKER_HOST:-}" colima_home="${COLIMA_HOME:-$HOME/.colima}" profile gw
     local colima_socket="unix://${colima_home%/}/"
-    if [[ -z "$endpoint" || -n "${DOCKER_CONTEXT:-}" ]]; then
+    if [[ -z "$endpoint" ]]; then
         endpoint=$(docker context show 2>/dev/null) && \
             endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}' "$endpoint" 2>/dev/null) || endpoint=""
     fi

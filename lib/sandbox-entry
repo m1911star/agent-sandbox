@@ -40,8 +40,11 @@ modelRoles:
 EOF
         ;;
     claude-code)
-        export ANTHROPIC_BASE_URL="${OPENAI_BASE_URL%/}"
-        ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL%/v1}"
+        ANTHROPIC_BASE_URL="$OPENAI_BASE_URL"
+        while [[ "$ANTHROPIC_BASE_URL" == */ ]]; do
+            ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL%/}"
+        done
+        export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL%/v1}"
         export ANTHROPIC_AUTH_TOKEN="$MAGPIE_API_KEY"
         export ANTHROPIC_MODEL="$MAGPIE_MODEL"
         export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
@@ -63,6 +66,10 @@ base_url = $url
 env_key = "MAGPIE_API_KEY"
 wire_api = "responses"
 EOF
+        ;;
+    *)
+        printf 'Unknown agent: %s\n' "$agent" >&2
+        exit 1
         ;;
 esac
 

@@ -24,7 +24,7 @@ Usage:
   sandbox up    <agent> [workspace] [--no-proxy]
   sandbox down  <agent> [--purge]
   sandbox list
-  sandbox status <agent>
+  sandbox status [agent]
 
 Agents:
   omp          OMP (Oh My Pi), command: omp
@@ -85,13 +85,17 @@ cmd_up() {
     local model="${MAGPIE_MODEL:-$AGENT_MODEL}" proxy_port="${PROXY_PORT:-}" magpie_key="${OPENAI_API_KEY:-}"
     [[ -n "$magpie_key" ]] || error "Export OPENAI_API_KEY with your Magpie gateway key."
     unset OPENAI_API_KEY MAGPIE_API_KEY
+    if [[ -n "${NPM_CONFIG_REGISTRY:-}" ]]; then
+        parse_http_url "$NPM_CONFIG_REGISTRY" \
+            || error "Set NPM_CONFIG_REGISTRY to an HTTP(S) URL with a host and optional port and path, without credentials, query, or fragment."
+    fi
     parse_gateway_url "${OPENAI_BASE_URL-$DEFAULT_GATEWAY_URL}" \
         || error "Set OPENAI_BASE_URL to an HTTP(S) URL with a host and optional port and path, without credentials, query, or fragment."
     [[ "$model" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$ ]] || error "Set MAGPIE_MODEL to a Magpie model ID."
     [[ "$skip_proxy" == false ]] || proxy_port=""
     [[ -z "$proxy_port" ]] || valid_port "$proxy_port" || error "Set PROXY_PORT to a port from 1 to 65535."
     if [[ -n "$workspace" ]]; then
-        workspace="$(CDPATH= cd -- "$workspace" && pwd -P)" || error "Workspace directory is not accessible."
+        workspace="$(CDPATH= cd -- "$workspace" 2>/dev/null && pwd -P)" || error "Workspace directory is not accessible."
         [[ "$workspace" != *:* ]] || error "Workspace path cannot contain a colon."
     fi
 
@@ -117,12 +121,16 @@ cmd_up() {
     echo "  Resume:  docker start -ai ${AGENT_CONTAINER}"
     echo ""
 
-    MAGPIE_API_KEY="$magpie_key" docker run -it "${SANDBOX_ARGS[@]}" "$AGENT_IMAGE"
+    local rc=0
+    MAGPIE_API_KEY="$magpie_key" docker run -it "${SANDBOX_ARGS[@]}" "$AGENT_IMAGE" || rc=$?
 
-    echo ""
-    info "Sandbox exited. Container preserved as '${AGENT_CONTAINER}'."
-    echo "  Resume:  docker start -ai ${AGENT_CONTAINER}"
-    echo "  Delete:  sandbox down ${agent} [--purge]"
+    if container_exists "$AGENT_CONTAINER" -a; then
+        echo ""
+        info "Sandbox exited. Container preserved as '${AGENT_CONTAINER}'."
+        echo "  Resume:  docker start -ai ${AGENT_CONTAINER}"
+        echo "  Delete:  sandbox down ${agent} [--purge]"
+    fi
+    return "$rc"
 }
 
 cmd_down() {
@@ -154,29 +162,34 @@ cmd_down() {
 }
 
 cmd_list() {
+    [[ $# -eq 0 ]] || error "Usage: sandbox list"
     require_docker
     header "Agents"
     printf "  %-14s %-12s %s\n" "NAME" "STATUS" "CONTAINER"
     echo "  ──────────────────────────────────────────"
 
-    local name
+    local name containers
+    containers=$(docker ps -a --format '{{.Names}}\t{{.State}}') || error "Could not list Docker containers."
     for name in $(list_agent_names); do
         (
             load_agent "$name"
-            local st="—"
-            if container_exists "$AGENT_CONTAINER"; then
-                st="running"
-            elif container_exists "$AGENT_CONTAINER" -a; then
-                st="stopped"
-            fi
+            local st="—" container state
+            while IFS=$'\t' read -r container state; do
+                [[ "$container" == "$AGENT_CONTAINER" ]] || continue
+                st=stopped
+                [[ "$state" != running ]] || st=running
+                break
+            done <<< "$containers"
             printf "  %-14s %-12s %s\n" "$name" "$st" "$AGENT_CONTAINER"
         )
     done
 }
 
 cmd_status() {
-    local agent="${1:-}"
-    [[ -n "$agent" ]] || { cmd_list; return; }
+    [[ $# -le 1 ]] || error "Usage: sandbox status [agent]"
+    [[ $# -ne 0 ]] || { cmd_list; return; }
+    local agent="$1"
+    [[ "$agent" != -* ]] || error "Unknown option: $agent"
 
     load_agent "$agent"
     require_docker
@@ -194,9 +207,9 @@ cmd_status() {
 case "$1" in
     up)       shift; cmd_up "$@" ;;
     down)     shift; cmd_down "$@" ;;
-    list|ls)  cmd_list ;;
+    list|ls)  shift; cmd_list "$@" ;;
     status)   shift; cmd_status "$@" ;;
     -h|--help|help) usage ;;
     -v|--version)   echo "agent-sandbox v${VERSION}" ;;
-    *)        error "Unknown command: $1\n       Run 'sandbox help' for usage." ;;
+    *)        error $'Unknown command: '"$1"$'\n       Run \'sandbox help\' for usage.' ;;
 esac

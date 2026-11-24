@@ -23,13 +23,33 @@ printf '%s\n' "$*" >> "$FAKE_DIR/calls"
 [[ "$*" != *"$FAKE_KEY"* && -z "${OPENAI_API_KEY+x}" ]] || exit 97
 case "$1" in
     info) printf '%s\n' "${FAKE_OS:-OrbStack}" ;;
-    ps) [[ -z "${FAKE_CONTAINER:-}" ]] || printf '%s\n' "$FAKE_CONTAINER" ;;
+    ps)
+        [[ "${FAKE_PS_EXIT:-0}" == 0 ]] || exit "$FAKE_PS_EXIT"
+        containers="${FAKE_PS_LINES:-}"
+        if [[ -f "$FAKE_DIR/run-container" ]]; then
+            containers+=$'\n'"$(cat "$FAKE_DIR/run-container")"
+        fi
+        while IFS=$'\t' read -r name state; do
+            [[ -n "$name" ]] || continue
+            [[ "$state" == running || " $* " == *' -a '* ]] || continue
+            case "${!#}" in
+                '{{.Names}}') printf '%s\n' "$name" ;;
+                '{{.Names}}\t{{.State}}') printf '%s\t%s\n' "$name" "$state" ;;
+                'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Size}}')
+                    [[ "$4" != "name=^$name\$" ]] || printf '%s\t%s\t%s:magpie\t0B\n' "$name" "$state" "$name"
+                    ;;
+                *) exit 98 ;;
+            esac
+        done <<< "$containers"
+        ;;
     context)
+        context="${DOCKER_CONTEXT:-fake-context}"
+        if [[ -n "${DOCKER_HOST:-}" ]]; then context=default; fi
         case "$2" in
-            show) printf '%s\n' "${DOCKER_CONTEXT:-fake-context}" ;;
+            show) printf '%s\n' "$context" ;;
             inspect)
-                [[ "$5" == "${DOCKER_CONTEXT:-fake-context}" ]] || exit 98
-                printf '%s\n' "${FAKE_ENDPOINT:-unix:///var/run/docker.sock}"
+                [[ "$5" == "$context" ]] || exit 98
+                printf '%s\n' "${DOCKER_HOST:-${FAKE_ENDPOINT:-unix:///var/run/docker.sock}}"
                 ;;
             *) exit 98 ;;
         esac
@@ -54,6 +74,10 @@ case "$1" in
     run)
         [[ "${MAGPIE_API_KEY:-}" == "$FAKE_KEY" ]] || exit 100
         printf '%s\n' "$@" > "$FAKE_DIR/run"
+        if [[ -n "${FAKE_RUN_CONTAINER:-}" ]]; then
+            printf '%s\texited\n' "$FAKE_RUN_CONTAINER" > "$FAKE_DIR/run-container"
+        fi
+        exit "${FAKE_RUN_EXIT:-0}"
         ;;
     rm) printf '%s\n' "$@" > "$FAKE_DIR/removed-container" ;;
     *) exit 101 ;;
@@ -75,8 +99,28 @@ chmod +x "$case_dir/bin/"*
 fail() { printf 'FAIL: %s\n' "$*" >&2; cat "$case_dir/output" >&2; exit 1; }
 launch() { "$root/sandbox" "$@" > "$case_dir/output" 2>&1 || fail "sandbox $*"; }
 reject() { if "$root/sandbox" "$@" > "$case_dir/output" 2>&1; then fail "expected sandbox $* to fail"; fi; }
+run_returns() {
+    local expected="$1" rc=0
+    shift
+    "$root/sandbox" "$@" > "$case_dir/output" 2>&1 || rc=$?
+    [[ "$rc" == "$expected" ]] || fail "expected sandbox $* to exit $expected, got $rc"
+}
 has_line() { grep -Fxq -- "$2" "$case_dir/$1" || fail "missing '$2' in $1"; }
 no_line() { if grep -Fxq -- "$2" "$case_dir/$1"; then fail "unexpected '$2' in $1"; fi; }
+
+reject bogus
+grep -Fq 'Unknown command: bogus' "$case_dir/output" || fail 'unknown command should name the command'
+has_line output "       Run 'sandbox help' for usage."
+if grep -Fq '\n' "$case_dir/output"; then fail 'unknown command printed a literal newline escape'; fi
+reject list extra
+grep -Fq 'Usage: sandbox list' "$case_dir/output" || fail 'list extra should report usage'
+reject ls extra
+grep -Fq 'Usage: sandbox list' "$case_dir/output" || fail 'ls extra should report usage'
+reject status omp extra
+grep -Fq 'Usage: sandbox status [agent]' "$case_dir/output" || fail 'status extra should report usage'
+reject status --extra
+grep -Fq 'Unknown option: --extra' "$case_dir/output" || fail 'status should report unknown options'
+[[ ! -e "$case_dir/calls" ]] || fail 'invalid commands contacted Docker or GitHub'
 
 reject up omp
 reject up codex
@@ -85,12 +129,22 @@ reject up claude-code
 export OPENAI_API_KEY="$FAKE_KEY"
 for url in '' 'file://localhost/v1' 'http://user:pass@gateway/v1' 'http://localhost:65536/v1' \
     'http://[::g]/v1' 'http://[1::2::3]/v1' 'http://999.1.1.1/v1' 'http://bad label/v1' \
-    'http://gateway/bad%zz' 'http://gateway/v1?key=test' 'https://gateway/v1#fragment'; do
+    'http://gateway/bad%zz' 'http://gateway/v1?key=test' 'https://gateway/v1#fragment' \
+    $'http://gateway\n:3425/v1'; do
     OPENAI_BASE_URL="$url" reject up omp
     grep -q 'OPENAI_BASE_URL' "$case_dir/output" || fail 'invalid URL should report OPENAI_BASE_URL'
 done
+for registry in 'http://user:pass@registry.example' 'https://registry.example/npm/?key=test' \
+    'https://registry.example/npm/#fragment' 'ftp://registry.example/npm/' \
+    'https://bad host/npm/' 'https://registry.example:65536/npm/' $'https://registry.example\n'; do
+    NPM_CONFIG_REGISTRY="$registry" reject up omp
+    grep -Fq 'NPM_CONFIG_REGISTRY' "$case_dir/output" || fail 'invalid registry should report NPM_CONFIG_REGISTRY'
+done
 PROXY_PORT=0 reject up omp
 MAGPIE_MODEL='model"' reject up codex
+reject up omp "$case_dir/missing-project"
+grep -Fq 'Workspace directory is not accessible.' "$case_dir/output" || fail 'missing workspace should report an error'
+if grep -Fq 'cd:' "$case_dir/output"; then fail 'workspace error leaked raw cd stderr'; fi
 [[ ! -e "$case_dir/calls" ]] || fail 'invalid input contacted Docker or GitHub'
 
 for agent in omp claude-code codex; do
@@ -128,9 +182,10 @@ for agent in omp claude-code codex; do
     esac
 done
 [[ ! -e "$case_dir/colima-calls" ]] || fail 'OrbStack must not query an installed Colima CLI'
-FAKE_IMAGE=absent NPM_CONFIG_REGISTRY=https://registry.example launch up claude-code
-has_line build 'NPM_CONFIG_REGISTRY=https://registry.example'
-no_line run 'NPM_CONFIG_REGISTRY=https://registry.example'
+FAKE_IMAGE=absent NPM_CONFIG_REGISTRY=https://registry.example/npm/ launch up claude-code
+has_line build 'NPM_CONFIG_REGISTRY=https://registry.example/npm/'
+no_line run 'NPM_CONFIG_REGISTRY=https://registry.example/npm/'
+has_line run 'OPENAI_BASE_URL=http://host.docker.internal:3425/v1'
 
 workspace=$(cd "$case_dir/project with spaces" && pwd -P)
 url='https://gateway.example:4343/nested/with%20space/v1/'
@@ -164,12 +219,19 @@ has_line run 'OPENAI_BASE_URL=https://[2001:db8::1]:4000/v1'
 has_line run 'NO_PROXY=localhost,127.0.0.1,::1,host.docker.internal,2001:db8::1,[2001:db8::1]'
 no_line run --add-host
 
-FAKE_OS='Ubuntu' FAKE_ENDPOINT="unix://$HOME/.colima/dev/docker.sock" DOCKER_CONTEXT=colima-dev \
-    DOCKER_HOST='ssh://other-machine' launch up claude-code
+FAKE_OS='Ubuntu' FAKE_ENDPOINT="unix://$HOME/.colima/dev/docker.sock" DOCKER_CONTEXT=colima-dev launch up claude-code
 has_line run 'host.docker.internal:192.168.64.1'
 has_line colima-calls '--profile dev ssh -- ip route show default'
-DOCKER_HOST="unix://$HOME/.colima/dev/docker.sock" FAKE_OS='Ubuntu' launch up claude-code
+: > "$case_dir/colima-calls"
+: > "$case_dir/calls"
+FAKE_OS='Ubuntu' FAKE_ENDPOINT="unix://$HOME/.colima/dev/docker.sock" DOCKER_CONTEXT=colima-dev \
+    DOCKER_HOST='ssh://other-machine' launch up claude-code
+has_line run 'host.docker.internal:host-gateway'
+[[ ! -s "$case_dir/colima-calls" ]] || fail 'DOCKER_HOST should override the Colima context'
+if grep -q '^context ' "$case_dir/calls"; then fail 'DOCKER_HOST should skip Docker context lookups'; fi
+DOCKER_HOST="unix://$HOME/.colima/dev/docker.sock" DOCKER_CONTEXT=other-context FAKE_OS='Ubuntu' launch up claude-code
 has_line run 'host.docker.internal:192.168.64.1'
+has_line colima-calls '--profile dev ssh -- ip route show default'
 
 OPENAI_BASE_URL='https://Host.Docker.Internal.:4000/v1' FAKE_OS='Debian GNU/Linux' launch up codex
 has_line run 'OPENAI_BASE_URL=https://Host.Docker.Internal.:4000/v1'
@@ -177,22 +239,60 @@ has_line run 'host.docker.internal:host-gateway'
 
 if grep -Eq 'sandbox-auth|host-decoy|GH_TOKEN|unexpected gh call' "$case_dir/calls"; then fail 'host auth leaked'; fi
 : > "$case_dir/calls"
-FAKE_CONTAINER=sandbox-omp reject up omp
+FAKE_PS_LINES=$'sandbox-omp\texited' reject up omp
 grep -q 'docker start -ai sandbox-omp' "$case_dir/output" || fail 'existing container must offer resume'
 grep -q 'sandbox down omp' "$case_dir/output" || fail 'existing container must offer explicit removal'
 if grep -Eq '^((image|container) )?(build|create|run|rm|rmi|prune)( |$)' "$case_dir/calls"; then
     fail 'up modified Docker state when the container already existed'
 fi
+
+FAKE_RUN_EXIT=125 run_returns 125 up omp
+if grep -Fq 'Container preserved' "$case_dir/output"; then fail 'up claimed a missing container was preserved'; fi
+FAKE_RUN_EXIT=42 FAKE_RUN_CONTAINER=sandbox-omp run_returns 42 up omp
+grep -Fq "Container preserved as 'sandbox-omp'" "$case_dir/output" || fail 'up lost the container preservation footer on failure'
+tail -n 2 "$case_dir/output" | grep -Fxq '  Resume:  docker start -ai sandbox-omp' || fail 'up footer must offer resume'
+rm "$case_dir/run-container"
+
 unset OPENAI_API_KEY
-FAKE_CONTAINER=sandbox-omp launch down omp --purge
+: > "$case_dir/calls"
+ps_lines=$'sandbox-omp\trunning\nsandbox-claude-code\tpaused\nsandbox-codex-old\texited'
+FAKE_PS_LINES="$ps_lines" launch list
+[[ $(grep -c '^ps ' "$case_dir/calls") == 1 ]] || fail 'list should call docker ps exactly once'
+has_line output '  NAME           STATUS       CONTAINER'
+has_line output '  omp            running      sandbox-omp'
+has_line output '  claude-code    stopped      sandbox-claude-code'
+has_line output "$(printf '  %-14s %-12s %s' codex '—' sandbox-codex)"
+cp "$case_dir/output" "$case_dir/list-output"
+FAKE_PS_LINES="$ps_lines" launch status
+cmp -s "$case_dir/list-output" "$case_dir/output" || fail 'status without arguments must match list'
+FAKE_PS_LINES=$'sandbox-omp\texited' launch status omp
+has_line output $'sandbox-omp\texited\tsandbox-omp:magpie\t0B'
+FAKE_PS_EXIT=1 reject list
+grep -Fq 'Could not list Docker containers.' "$case_dir/output" || fail 'list must report a Docker listing failure'
+
+FAKE_PS_LINES=$'sandbox-omp\texited' launch down omp --purge
 has_line removed-container sandbox-omp
 has_line removed-image sandbox-omp:magpie
 if grep -q 'prune' "$case_dir/calls"; then fail 'down --purge pruned unrelated images'; fi
+(
+    source "$root/lib/common.sh"
+    GATEWAY_URL='https://gateway.example/v1' GATEWAY_HOST='gateway.example'
+    parse_http_url 'hTTps://[::FFFF:127.1.2.3]:4343/npm/' || fail 'parse_http_url rejected a valid IPv6 URL'
+    [[ "$URL_SCHEME" == 'hTTps://' && "$URL_HOST" == '::ffff:127.1.2.3' && "$URL_PORT" == 4343 &&
+       "$URL_PATH" == '/npm/' && "$URL_LOOPBACK" == true ]] || fail 'parse_http_url returned incorrect IPv6 URL components'
+    parse_http_url 'http://Registry.EXAMPLE' || fail 'parse_http_url rejected a valid DNS URL'
+    [[ "$URL_HOST" == 'registry.example' && -z "$URL_PORT" && -z "$URL_PATH" && "$URL_LOOPBACK" == false ]] \
+        || fail 'parse_http_url returned incorrect DNS URL components'
+    [[ "$GATEWAY_URL" == 'https://gateway.example/v1' && "$GATEWAY_HOST" == 'gateway.example' ]] \
+        || fail 'parse_http_url changed the gateway URL or host'
+    [[ $(strip_v1_suffix 'http://x/v1//') == 'http://x' ]] || fail 'strip_v1_suffix must remove trailing slashes and /v1'
+    [[ $(strip_v1_suffix 'http://x/v1/v1/') == 'http://x/v1' ]] || fail 'strip_v1_suffix must remove only one /v1'
+)
 printf 'Fake Docker CLI tests passed.\n'
 
+export HOME="$case_dir/container-home" OPENAI_BASE_URL="$url" MAGPIE_MODEL='custom/model-id' MAGPIE_API_KEY="$FAKE_KEY"
+entry="$case_dir/context/sandbox-entry"
 if command -v jq >/dev/null 2>&1; then
-    export HOME="$case_dir/container-home" OPENAI_BASE_URL="$url" MAGPIE_MODEL='custom/model-id' MAGPIE_API_KEY="$FAKE_KEY"
-    entry="$case_dir/context/sandbox-entry"
     for agent in omp codex; do
         bash "$entry" "$agent" -c 'exit' || fail "$agent entrypoint"
     done
@@ -226,13 +326,20 @@ if command -v jq >/dev/null 2>&1; then
     bash "$entry" omp -c 'exit' || fail 'OMP partial config restart'
     has_line 'container-home/.omp/agent/models.yml' '    apiKey: MAGPIE_API_KEY'
     has_line 'container-home/.omp/agent/config.yml' 'container-edit'
-
-    bash "$entry" claude-code -c '
-        [[ "$ANTHROPIC_BASE_URL" == "https://gateway.example:4343/nested/with%20space" &&
-           "$ANTHROPIC_AUTH_TOKEN" == "$FAKE_KEY" && "$ANTHROPIC_MODEL" == "custom/model-id" &&
-           "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" == 1 ]]
-    ' || fail 'Claude Code environment'
-    printf 'Container entrypoint tests passed.\n'
 else
-    printf 'Container entrypoint tests skipped (jq is not installed on the test host).\n'
+    printf 'OMP and Codex entrypoint tests skipped (jq is not installed on the test host).\n'
 fi
+
+bash "$entry" claude-code -c '
+    [[ "$ANTHROPIC_BASE_URL" == "https://gateway.example:4343/nested/with%20space" &&
+       "$ANTHROPIC_AUTH_TOKEN" == "$FAKE_KEY" && "$ANTHROPIC_MODEL" == "custom/model-id" &&
+       "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" == 1 ]]
+' || fail 'Claude Code environment'
+OPENAI_BASE_URL='https://gateway.example:4343/nested/v1///' bash "$entry" claude-code -c '
+    [[ "$ANTHROPIC_BASE_URL" == "https://gateway.example:4343/nested" ]]
+' || fail 'Claude Code must strip all trailing slashes before /v1'
+if bash "$entry" unknown -c 'exit 0' 2> "$case_dir/output"; then
+    fail 'unknown entrypoint agent should fail'
+fi
+has_line output 'Unknown agent: unknown'
+printf 'Container entrypoint tests passed.\n'
